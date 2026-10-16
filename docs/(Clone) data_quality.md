@@ -473,3 +473,222 @@ Identifier and categorical columns were preserved as strings.
 
 No NULL handling, duplicate removal, or additional data-quality flagging was required.
 
+---
+
+## Data Quality Observations — Order Reviews
+
+### 1. Dataset Overview
+
+- Total source records: 104,162
+- Total columns: 7
+- Exact duplicate records: 85
+- Records remaining after removing exact duplicates: 104,077
+- Intended grain: One row per review record.
+- Business key: `review_id` is the intended identifier, but its reliability is affected by missing values and malformed records.
+
+### 2. Missing Values
+
+| Column | Null Count | Observation |
+|---|---:|---|
+| `review_id` | 1 | Missing review identifier |
+| `order_id` | 2,236 | Missing order reference |
+| `review_score` | 2,380 | Missing or potentially malformed review score |
+| `review_comment_title` | 92,157 | Optional review title; NULL values are acceptable |
+| `review_comment_message` | 63,079 | Optional review message; NULL values are acceptable |
+| `review_creation_date` | 8,764 | Missing review creation timestamp |
+| `review_answer_timestamp` | 8,785 | Missing review response timestamp |
+
+**Observations:**
+- Missing review titles and messages are not necessarily data quality issues because customers can submit reviews without written comments.
+- Missing identifiers and scores require monitoring.
+- Missing timestamps are preserved rather than replaced with artificial values.
+
+### 3. Duplicate Records
+
+- The source contains 85 exact duplicate rows.
+- Exact duplicates are removed using `dropDuplicates()`.
+- Deduplication is performed across all columns because a reliable business key has not been established.
+- Records are not deduplicated using `review_id` alone.
+
+### 4. Identifier Validation
+
+- Expected identifier format: 32-character hexadecimal strings.
+- One record has a missing `review_id`.
+- Validation identified 2,702 records with non-null `order_id` values that do not match the expected identifier format.
+- A sample of these records contains timestamps and product-description text in identifier and score columns, indicating apparent column misalignment.
+
+**Decision:**
+- Preserve malformed records and flag them using `data_quality_status`.
+- Do not treat malformed identifiers as valid business keys.
+- Investigate the original CSV parsing and ingestion configuration in a future remediation step.
+
+### 5. Referential Integrity
+
+- `order_id` is expected to reference `orders.order_id`.
+- The latest validation identified 2,702 records with non-null `order_id` values that failed the expected identifier-format check.
+- These records require separate treatment from records with genuinely missing `order_id` values.
+- Referential integrity should be validated again after resolving the apparent column misalignment.
+
+### 6. Review Score Validation
+
+- Expected values: Integers from 1 to 5.
+- The source contains 2,380 NULL review scores.
+- Some records contain timestamp strings in `review_score`, indicating apparent column misalignment.
+- `try_cast` is used to prevent malformed values from causing transformation failures.
+- Missing or malformed scores are flagged rather than replaced with arbitrary values.
+
+### 7. Timestamp Standardization
+
+The following columns are converted to timestamp data types:
+
+- `review_creation_date`
+- `review_answer_timestamp`
+
+NULL values are preserved. Records containing malformed timestamp values may require further investigation.
+
+### 8. Silver Layer Decisions
+
+| Data Quality Issue | Silver Layer Decision |
+|---|---|
+| Exact duplicate rows | Remove exact duplicates |
+| Missing review identifiers | Preserve and flag |
+| Missing order identifiers | Preserve and flag |
+| Malformed identifiers | Preserve and flag |
+| Missing or malformed review scores | Preserve as NULL after safe casting and flag |
+| Optional review comments | Preserve NULL values |
+| Missing timestamps | Preserve NULL values |
+| Incorrect column alignment | Document for further investigation |
+
+### 9. Known Limitation
+
+The malformed identifier and score values suggest a possible CSV parsing or column-alignment issue. The current Silver transformation prevents casting failures and flags suspicious records, but it does not repair the underlying source data.
+
+The affected records should be investigated before using them for review-level analytics.
+
+### 10. Final Decision
+
+The `order_reviews` Silver table standardizes data types, removes exact duplicates, preserves NULL values, and flags identified data quality issues.
+
+The table is retained for downstream processing, with the known source-data limitation documented.
+
+---
+
+## 10. Geolocation
+
+### Overview
+- **Source Table:** `ecommerce.bronze.geolocation`
+- **Target Table:** `ecommerce.silver.geolocation`
+- **Original Row Count:** 1,000,163
+- **Row Count After Deduplication:** 738,332
+- **Exact Duplicate Rows Removed:** 261,831
+- **Number of Columns:** 5 in the original Bronze table
+- **Grain:** One row represents a geographic observation associated with a ZIP code prefix. Multiple observations can exist for the same prefix.
+- **Business Key:** No unique business key identified.
+
+### 1. Null Value Validation
+
+All five columns were checked for NULL values in the Bronze table.
+
+| Column | NULL Count | Action |
+|---|---:|---|
+| geolocation_zip_code_prefix | 0 | No action required |
+| geolocation_lat | 0 | Validate numeric conversion |
+| geolocation_lng | 0 | Validate numeric conversion |
+| geolocation_city | 0 | No action required |
+| geolocation_state | 0 | No action required |
+
+### 2. Duplicate Validation
+
+Exact duplicate rows were identified and removed.
+
+| Metric | Count |
+|---|---:|
+| Original rows | 1,000,163 |
+| Rows after deduplication | 738,332 |
+| Exact duplicate rows removed | 261,831 |
+
+**Cleaning Decision:**
+- Removed completely identical rows.
+- Preserved distinct geographic observations, including observations sharing the same ZIP code prefix.
+- Did not treat ZIP code prefix as a unique identifier.
+
+### 3. Data Type Validation
+
+The Bronze table stores all columns as strings.
+
+The following data types are required in the Silver layer:
+
+| Column | Target Data Type |
+|---|---|
+| geolocation_zip_code_prefix | STRING |
+| geolocation_lat | DOUBLE |
+| geolocation_lng | DOUBLE |
+| geolocation_city | STRING |
+| geolocation_state | STRING |
+
+The ZIP code prefix remains a string to preserve leading zeros.
+
+### 4. Coordinate Validation
+
+Latitude and longitude values were checked for numeric convertibility and valid geographic ranges.
+
+| Validation | Expected Range |
+|---|---|
+| Latitude | -90 to 90 |
+| Longitude | -180 to 180 |
+
+The validation results after exact duplicate removal were:
+
+| Metric | Count |
+|---|---:|
+| Rows validated | 738,332 |
+| Rows with VALID coordinate status | 738,332 |
+| Rows with invalid or missing coordinate status | 0 |
+
+**Cleaning Decision:**
+- Retained records with valid coordinates.
+- Used safe numeric conversion to identify unconvertible values.
+- Flagged missing, unconvertible, or out-of-range coordinates for investigation rather than automatically deleting records.
+
+**Note:** These results establish that the remaining rows passed the implemented coordinate checks. They do not establish that each coordinate accurately corresponds to its stated ZIP code prefix or city.
+
+### 5. Business Key and Referential Integrity
+
+- No unique business key was identified.
+- ZIP code prefixes can appear in multiple records.
+- No direct foreign key was identified.
+- Geolocation data can enrich customer and seller records using their respective ZIP code prefix columns.
+
+Potential enrichment columns:
+- `customers.customer_zip_code_prefix`
+- `sellers.seller_zip_code_prefix`
+- `geolocation.geolocation_zip_code_prefix`
+
+### 6. Cleaning Decisions
+
+1. Removed 261,831 exact duplicate rows.
+2. Converted latitude and longitude to DOUBLE.
+3. Preserved ZIP code prefixes as STRING.
+4. Retained city and state as STRING.
+5. Added `coordinate_quality_status` to identify coordinate quality issues.
+6. Preserved distinct geographic observations sharing the same ZIP code prefix.
+7. Prepared the cleaned data for storage in `ecommerce.silver.geolocation`.
+
+### 7. Post-Transformation Validation
+
+The following checks should be completed after saving the Silver table:
+
+- Confirm the final row count is 738,332.
+- Verify the expected schema and data types.
+- Confirm no exact duplicate rows remain.
+- Verify coordinate quality status counts.
+- Confirm latitude and longitude fall within their valid ranges.
+- Ensure repeated ZIP code prefixes are preserved.
+
+### Conclusion
+
+The original geolocation dataset contained 1,000,163 rows. Exact duplicate removal reduced the dataset to 738,332 rows, eliminating 261,831 duplicate records.
+
+All 738,332 remaining rows passed the implemented coordinate validation. The cleaned dataset retains ZIP code prefixes as strings and geographic coordinates as numeric values, making it suitable for downstream customer and seller geographic enrichment.
+
+The Silver table should be validated after saving to confirm the final schema, row count, and data quality results.
